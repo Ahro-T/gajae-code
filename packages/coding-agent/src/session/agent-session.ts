@@ -23775,6 +23775,7 @@ export class AgentSession {
 				: undefined;
 			let unavailableDefaultChainMessage: string | undefined;
 			let recoveredDefaultChainMessage: string | undefined;
+			let recoveredThinkingLevel: ThinkingLevel | undefined;
 			let durableDefaultRecoveryError: string | undefined;
 			let transitionCleanupCommitted = false;
 
@@ -23928,6 +23929,7 @@ export class AgentSession {
 										recovery.skips,
 									);
 									resolvedModel = recovery.model;
+									recoveredThinkingLevel = recovery.explicitThinkingLevel ? recovery.thinkingLevel : undefined;
 									recoveredDefaultChainMessage =
 										"Saved session model is no longer registered; restored the durable default preset instead.";
 								}
@@ -23970,7 +23972,7 @@ export class AgentSession {
 				const configuredServiceTier = this.settings.get("serviceTier");
 				const persistedThinkingLevel = hasThinkingEntry
 					? (sessionContext.thinkingLevel as ThinkingLevel | undefined)
-					: defaultThinkingLevel;
+					: (recoveredThinkingLevel ?? defaultThinkingLevel);
 				const nextThinkingLevel = resolveThinkingLevelForModel(
 					this.model,
 					persistedThinkingLevel === ThinkingLevel.Inherit
