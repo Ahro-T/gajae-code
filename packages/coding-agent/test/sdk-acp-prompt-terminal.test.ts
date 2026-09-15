@@ -561,12 +561,16 @@ async function createFixture(
 		releaseFailureDiagnostic: () => failureDiagnosticRelease.resolve(),
 		releasePromptAcknowledgement: () => deferredPromptAcknowledgement?.(),
 		sendTerminal,
-		retryBackoffScheduled: () => retryBackoffScheduleCount,
-		releaseRetryBackoff: () => {
-			const handler = retryBackoffHandler;
-			retryBackoffHandler = undefined;
-			handler?.();
-		},
+		...(options.controlRetryBackoff
+			? {
+					retryBackoffScheduled: () => retryBackoffScheduleCount,
+					releaseRetryBackoff: () => {
+						const handler = retryBackoffHandler;
+						retryBackoffHandler = undefined;
+						handler?.();
+					},
+				}
+			: {}),
 		dispose: () => {
 			agentMessageUpdateRelease.resolve();
 			failureDiagnosticRelease.resolve();

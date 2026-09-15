@@ -1816,13 +1816,13 @@ export class AcpAgent implements Agent {
 	async #submitPrompt(params: PromptRequest, echoUserMessage: boolean, retryOwner?: symbol): Promise<PromptResponse> {
 		const record = this.#sessions.get(params.sessionId);
 		if (!record) throw new AcpSdkAdapterError("not_found", `Unknown session, not found: ${params.sessionId}`);
-		if (record.activePrompt) throw new AcpSdkAdapterError("conflict", "ACP session already has an active prompt.");
 		// A first-turn retry reserves the session across its backoff gap. Any prompt other than
 		// that retry (a different owner token, or none) is refused deterministically here — before
 		// any dispatch or first-turn state mutation — so it cannot claim the session while the
 		// reservation is pending (review P1).
 		if (record.firstPromptRetryOwner !== undefined && record.firstPromptRetryOwner !== retryOwner)
 			throw new AcpSdkAdapterError("conflict", "ACP session is retrying its first prompt.");
+		if (record.activePrompt) throw new AcpSdkAdapterError("conflict", "ACP session already has an active prompt.");
 		if (record.authFailure) throw new AcpSdkAdapterError("authentication_failed", record.authFailure);
 		if (this.#retiredPromptAcknowledgements.has(params.sessionId))
 			throw new AcpSdkAdapterError(
