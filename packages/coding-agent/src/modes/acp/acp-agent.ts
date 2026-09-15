@@ -224,17 +224,15 @@ type SessionRecord = {
 	promptObservedActivity?: boolean;
 	/** Whether the current prompt attempt executed a tool; reset per attempt, vetoes a first-turn retry that would re-run it. */
 	promptObservedToolExecution?: boolean;
-	/** Owner token held across the first-turn retry backoff; a non-owner prompt is rejected as a conflict (review P1). */
-	pendingFirstPromptRetry?: FirstPromptRetryReservation;
+	/**
+	 * Owner token of an in-flight first-turn retry. Set once the failed first turn is accepted
+	 * for retry and held across the backoff and resubmission, so the gap where `activePrompt`
+	 * is unset cannot admit a concurrent prompt that would claim the session or mutate first-turn
+	 * retry state (review P1). Released on retry success, final failure, or cancellation.
+	 */
+	firstPromptRetryOwner?: symbol;
 };
 
-/**
- * Identity token proving a caller owns an in-progress first-turn retry. While it is held on the
- * session record, `#submitPrompt` rejects any prompt that is not this owner, so a concurrent
- * request cannot slip into the gap between `#settlePrompt` clearing `activePrompt` on the failed
- * first attempt and the retry resubmitting after its backoff (review P1, issue #5574).
- */
-type FirstPromptRetryReservation = { readonly firstPromptRetry: true };
 
 /**
  * Prompt-owned frame types that prove the turn is underway (as opposed to a
@@ -1729,36 +1727,45 @@ export class AcpAgent implements Agent {
 		// An unknown session must still report not_found; the retry loop only guards a
 		// live session's first turn against a startup readiness race (issue #5574).
 		if (!record) return await this.#submitPrompt(params, true);
-		// Identity of THIS caller's first-turn retry. Held on the record across the backoff so a
-		// concurrent prompt racing the gap is rejected as a conflict rather than admitted (review P1).
-		const retryReservation: FirstPromptRetryReservation = { firstPromptRetry: true };
+		// Unique per prompt() call: identifies THIS call as the owner of any first-turn retry
+		// reservation it takes, so its own resubmission is admitted while every other prompt is
+		// refused (review P1).
+		const retryOwner = Symbol("acp-first-prompt-retry");
 		try {
 			let echoUserMessage = true;
 			for (let attempt = 0; ; attempt++) {
 				try {
-					return await this.#submitPrompt(params, echoUserMessage, retryReservation);
+					return await this.#submitPrompt(params, echoUserMessage, retryOwner);
 				} catch (error) {
 					if (!this.#shouldRetryFirstPrompt(record, error, attempt)) throw error;
 					// The user's message was already echoed on the first attempt; re-echoing
 					// would duplicate it in the client transcript.
 					echoUserMessage = false;
-					// Reserve the session BEFORE the backoff sleep. `#settlePrompt` already cleared
-					// `activePrompt` when it rejected this attempt, so without the reservation the
-					// backoff gap admits a competing prompt that steals the first turn (review P1).
-					record.pendingFirstPromptRetry = retryReservation;
+					// Reserve the session for this retry before the backoff. `#settlePrompt`
+					// already cleared `activePrompt` when it rejected the failed waiter, so
+					// without a reservation a concurrent prompt() would pass the `activePrompt`
+					// overlap check during the backoff, claim the session, and dispatch its own
+					// first turn — leaving the retry to wake into a conflict it was already
+					// authorized past (review P1). The reservation is released in the finally on
+					// success, final failure, or cancellation.
+					record.firstPromptRetryOwner = retryOwner;
 					logger.warn("ACP first-turn prompt failed; retrying after readiness backoff", {
 						sessionId: params.sessionId,
 						attempt: attempt + 1,
 						maxRetries: ACP_FIRST_PROMPT_MAX_RETRIES,
 					});
 					await this.#delayFirstPromptRetry(attempt);
+					// A cancel that landed during the backoff must abort the retry rather than
+					// resubmit a turn the client no longer wants; the reservation is released below.
+					if (record.cancelRequested) throw error;
 				}
 			}
 		} finally {
-			// Release the reservation on retry completion (success), cancellation, or final
-			// failure. Guarded so a later prompt that took ownership is never cleared by this caller.
-			if (record.pendingFirstPromptRetry === retryReservation) record.pendingFirstPromptRetry = undefined;
-			record.firstPromptDone = true;
+			// Only the call that owns the session's first turn may retire first-turn state. A
+			// concurrent prompt that the reservation rejected must neither release another owner's
+			// reservation nor mark the first prompt done (review P1).
+			if (record.firstPromptRetryOwner === retryOwner) record.firstPromptRetryOwner = undefined;
+			if (record.firstPromptRetryOwner === undefined) record.firstPromptDone = true;
 		}
 	}
 
@@ -1806,19 +1813,16 @@ export class AcpAgent implements Agent {
 		});
 	}
 
-	async #submitPrompt(
-		params: PromptRequest,
-		echoUserMessage: boolean,
-		retryReservation?: FirstPromptRetryReservation,
-	): Promise<PromptResponse> {
+	async #submitPrompt(params: PromptRequest, echoUserMessage: boolean, retryOwner?: symbol): Promise<PromptResponse> {
 		const record = this.#sessions.get(params.sessionId);
 		if (!record) throw new AcpSdkAdapterError("not_found", `Unknown session, not found: ${params.sessionId}`);
-		// A first-turn retry holds the session across its backoff gap. Any prompt that is not the
-		// retry owner is rejected here, before any state mutation or dispatch, so it cannot steal
-		// the first turn while the authorized retry is still pending (review P1, issue #5574).
-		if (record.pendingFirstPromptRetry && record.pendingFirstPromptRetry !== retryReservation)
-			throw new AcpSdkAdapterError("conflict", "ACP session is retrying its first prompt.");
 		if (record.activePrompt) throw new AcpSdkAdapterError("conflict", "ACP session already has an active prompt.");
+		// A first-turn retry reserves the session across its backoff gap. Any prompt other than
+		// that retry (a different owner token, or none) is refused deterministically here — before
+		// any dispatch or first-turn state mutation — so it cannot claim the session while the
+		// reservation is pending (review P1).
+		if (record.firstPromptRetryOwner !== undefined && record.firstPromptRetryOwner !== retryOwner)
+			throw new AcpSdkAdapterError("conflict", "ACP session is retrying its first prompt.");
 		if (record.authFailure) throw new AcpSdkAdapterError("authentication_failed", record.authFailure);
 		if (this.#retiredPromptAcknowledgements.has(params.sessionId))
 			throw new AcpSdkAdapterError(
