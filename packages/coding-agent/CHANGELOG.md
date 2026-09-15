@@ -3,6 +3,9 @@
 ## [Unreleased]
 ### Changed
 
+### Fixed
+- A freshly created ACP session whose host accepts and starts the first turn before it has finished coming up, then fails it as `prompt_failed`, is retried a bounded number of times instead of ending the session on its first turn with an opaque `-32603` (issue #5574). The retry re-submits the first prompt as a new, independent `turn.prompt`, so it is now gated to stay idempotent and correctly scoped: it fires only for a session's first logical prompt, only on an `agent_failed` `prompt_failed` terminal, only after the turn was observed starting, and — crucially — never once the turn executed a tool, so a progressed, side-effecting turn is surfaced rather than re-run twice. `firstPromptDone` is preserved across endpoint reattachment (derived from the session's retained settled prompt correlations, and from a replayed prior user turn on load) so a prompt after a transport reconnect or `session/load` is never mistaken for a first prompt and given the retry path.
+
 ## [0.16.7] - 2026-09-13
 ### Fixed
 
